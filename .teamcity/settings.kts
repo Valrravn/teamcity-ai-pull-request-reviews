@@ -54,31 +54,28 @@ project {
         }
     }
 
-    pipeline(PrAiReviewPipeline)
-
-    subProject(ImportedFromGH)
+    pipeline(Sandbox_DmitriiKorovin_AIInBuilds_PrAiReviewPipeline)
 }
 
 object PrAiReview : BuildType({
     name = "PR AI Review"
 
     params {
+        param("review.run", "true")
+        param("review.publish", "false")
+        param("review.repository", "Valrravn/teamcity-multibranch-repo")
         param("review.acceptance.mode", "normal")
         param("review.model", "gpt-6.1-sol")
-        param("review.publisher.id", "241940790")
-        param("review.publish", "false")
+        param("review.publisher.id", "358671573")
         param("review.harness", "OpenAI CLI")
         param("jq.version", "1.8.1")
         param("review.effort", "xhigh")
-        param("review.publisher.login", "ai-checker[bot]")
         param("gh.version", "2.98.0")
-        param("review.run", "true")
     }
 
     vcs {
         root(HttpsGithubComValrravnTeamcityMultibranchRepoRefsHeadsMain)
     }
-
     steps {
         script {
             name = "Install tools"
@@ -121,8 +118,7 @@ object PrAiReview : BuildType({
                 GH="${'$'}OUTPUT_DIR/tools/gh"
                 JQ="${'$'}OUTPUT_DIR/tools/jq"
                 GH_CONFIG_DIR="${'$'}OUTPUT_DIR/gh-config"
-                REPOSITORY='Valrravn/teamcity-multibranch-repo'
-                PUBLISHER_LOGIN='%review.publisher.login%'
+                REPOSITORY='%review.repository%'
                 PUBLISHER_ID='%review.publisher.id%'
                 PR_NUMBER='%teamcity.pullRequest.number%'
                 VCS_REVISION='%build.vcs.number%'
@@ -170,13 +166,10 @@ object PrAiReview : BuildType({
                   "${'$'}JQ" -e \
                     --arg marker "${'$'}marker" \
                     --arg head "${'$'}head_sha" \
-                    --arg login "${'$'}PUBLISHER_LOGIN" \
                     --argjson publisher_id "${'$'}PUBLISHER_ID" \
-                    'add | any(.[]; .commit_id == ${'$'}head and .user.id == ${'$'}publisher_id and .user.login == ${'$'}login and ((.body // "") | contains(${'$'}marker)))' \
+                    'add | any(.[]; .commit_id == ${'$'}head and .user.id == ${'$'}publisher_id and ((.body // "") | contains(${'$'}marker)))' \
                     "${'$'}pages" >/dev/null
                 }
-                
-                run_gh api repos/${'$'}REPOSITORY/pulls/${'$'}PR_NUMBER/reviews --jq '.[].user | {login, id}'
                 
                 run_gh api "repos/${'$'}REPOSITORY/pulls/${'$'}PR_NUMBER" > "${'$'}OUTPUT_DIR/pr.json" \
                   || fail_closed 'GitHub pull-request metadata lookup failed'
@@ -186,14 +179,12 @@ object PrAiReview : BuildType({
                 base_ref="${'$'}("${'$'}JQ" -r '.base.ref' "${'$'}OUTPUT_DIR/pr.json")"
                 base_sha="${'$'}("${'$'}JQ" -r '.base.sha' "${'$'}OUTPUT_DIR/pr.json")"
                 is_draft="${'$'}("${'$'}JQ" -r '.draft' "${'$'}OUTPUT_DIR/pr.json")"
-                author_association="${'$'}("${'$'}JQ" -r '.author_association' "${'$'}OUTPUT_DIR/pr.json")"
                 
                 [ "${'$'}state" = 'open' ] || finish_without_review 'superseded' 'Pull request is no longer open'
                 [ "${'$'}head_sha" = "${'$'}VCS_REVISION" ] || finish_without_review 'superseded' 'Pull-request head changed before review'
                 [ "${'$'}head_repo" = "${'$'}REPOSITORY" ] || fail_closed 'Fork-originated pull requests are not eligible'
                 [ "${'$'}base_ref" = 'main' ] || fail_closed 'Pull request does not target main'
                 [ "${'$'}is_draft" = 'false' ] || fail_closed 'Draft pull requests are not eligible'
-                # [ "${'$'}author_association" = 'MEMBER' ] || fail_closed 'Pull-request author is not a GitHub organization member'
                 
                 if [ "${'$'}ACCEPTANCE_MODE" = 'normal' ]; then
                   marker_status=0
@@ -212,8 +203,8 @@ object PrAiReview : BuildType({
                 git merge-base --is-ancestor "${'$'}merge_base" "${'$'}head_sha" \
                   || fail_closed 'Merge base is not an ancestor of the pull request head'
                 
-                THREADS_QUERY='query(${'$'}number:Int!,${'$'}endCursor:String){repository(owner:"Valrravn",name:"teamcity-multibranch-repo"){pullRequest(number:${'$'}number){reviewThreads(first:100,after:${'$'}endCursor){nodes{id isResolved isOutdated path line startLine diffSide} pageInfo{hasNextPage endCursor}}}}}'
-                run_gh api graphql --paginate --slurp -F number="${'$'}PR_NUMBER" -f query="${'$'}THREADS_QUERY" > "${'$'}OUTPUT_DIR/thread-pages.json" \
+                THREADS_QUERY='query(${'$'}owner:String!,${'$'}name:String!,${'$'}number:Int!,${'$'}endCursor:String){repository(owner:${'$'}owner,name:${'$'}name){pullRequest(number:${'$'}number){reviewThreads(first:100,after:${'$'}endCursor){nodes{id isResolved isOutdated path line startLine diffSide} pageInfo{hasNextPage endCursor}}}}}'
+                run_gh api graphql --paginate --slurp -f owner="${'$'}(cut -d/ -f1 <<< "${'$'}REPOSITORY")" -f name="${'$'}(cut -d/ -f2 <<< "${'$'}REPOSITORY")" -F number="${'$'}PR_NUMBER" -f query="${'$'}THREADS_QUERY" > "${'$'}OUTPUT_DIR/thread-pages.json" \
                   || fail_closed 'Unable to fetch unresolved review threads'
                 
                 "${'$'}JQ" -c '.[] | .data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)' "${'$'}OUTPUT_DIR/thread-pages.json" |
@@ -510,229 +501,4 @@ object PrAiReview : BuildType({
                   line:.location.end_line,
                   side:"RIGHT"
                 } + (if .location.start_line < .location.end_line then {start_line:.location.start_line,start_side:"RIGHT"} else {} end)]' \
-                  "${'$'}OUTPUT_DIR/inline-findings.json" > "${'$'}OUTPUT_DIR/inline-comments.json"
-                
-                "${'$'}JQ" -n \
-                  --arg commit_id "${'$'}head_sha" \
-                  --arg body "${'$'}body" \
-                  --slurpfile comments "${'$'}OUTPUT_DIR/inline-comments.json" \
-                  '{commit_id:${'$'}commit_id,body:${'$'}body,event:"COMMENT",comments:${'$'}comments[0]}' \
-                  > "${'$'}OUTPUT_DIR/review-payload.json"
-                
-                "${'$'}JQ" \
-                  --slurpfile findings "${'$'}OUTPUT_DIR/sorted-findings.json" \
-                  --slurpfile comments "${'$'}OUTPUT_DIR/inline-comments.json" \
-                  '.validation={status:"passed",finding_count:(${'$'}findings[0] | length),inline_count:(${'$'}comments[0] | length)} | .publication={outcome:"pending"}' \
-                  "${'$'}OUTPUT_DIR/review-result.json" > "${'$'}OUTPUT_DIR/review-result.next.json"
-                mv "${'$'}OUTPUT_DIR/review-result.next.json" "${'$'}OUTPUT_DIR/review-result.json"
-                
-                echo "##teamcity[setParameter name='review.publish' value='true']"
-            """.trimIndent()
-        }
-        script {
-            name = "Publish review"
-            id = "Publish_review"
-
-            conditions {
-                equals("review.publish", "true")
-            }
-            scriptContent = """
-                #!/usr/bin/env bash
-                set -euo pipefail
-                
-                OUTPUT_DIR='%system.teamcity.build.tempDir%/codex-pr-review'
-                GH="${'$'}OUTPUT_DIR/tools/gh"
-                JQ="${'$'}OUTPUT_DIR/tools/jq"
-                GH_CONFIG_DIR="${'$'}OUTPUT_DIR/gh-config"
-                REPOSITORY='Valrravn/teamcity-multibranch-repo'
-                PUBLISHER_LOGIN='%review.publisher.login%'
-                PUBLISHER_ID='%review.publisher.id%'
-                PR_NUMBER='%teamcity.pullRequest.number%'
-                GITHUB_APP_TOKEN='%github.token%'
-                PAYLOAD="${'$'}OUTPUT_DIR/review-payload.json"
-                RESULT="${'$'}OUTPUT_DIR/review-result.json"
-                
-                run_gh() {
-                  env -u GH_TOKEN -u GITHUB_TOKEN \
-                    GH_TOKEN="${'$'}GITHUB_APP_TOKEN" GH_CONFIG_DIR="${'$'}GH_CONFIG_DIR" \
-                    "${'$'}GH" "${'$'}@"
-                }
-                
-                head_sha="${'$'}("${'$'}JQ" -r '.reviewed_head_sha' "${'$'}OUTPUT_DIR/review-context.json")"
-                marker="<!-- teamcity-codex-review:v1 head=${'$'}head_sha -->"
-                
-                lookup_marker() {
-                  run_gh api --paginate --slurp "repos/${'$'}REPOSITORY/pulls/${'$'}PR_NUMBER/reviews?per_page=100" > "${'$'}OUTPUT_DIR/reviews-pages.json" || return 2
-                  "${'$'}JQ" -e \
-                    --arg marker "${'$'}marker" \
-                    --arg head "${'$'}head_sha" \
-                    --arg login "${'$'}PUBLISHER_LOGIN" \
-                    --argjson publisher_id "${'$'}PUBLISHER_ID" \
-                    'add | any(.[]; .commit_id == ${'$'}head and .user.id == ${'$'}publisher_id and .user.login == ${'$'}login and ((.body // "") | contains(${'$'}marker)))' \
-                    "${'$'}OUTPUT_DIR/reviews-pages.json" >/dev/null
-                }
-                
-                set_outcome() {
-                  local outcome="${'$'}1" reason="${'$'}2" review_url="${'$'}{3:-}"
-                  "${'$'}JQ" --arg outcome "${'$'}outcome" --arg reason "${'$'}reason" --arg review_url "${'$'}review_url" --arg marker "${'$'}marker" \
-                    '.publication={outcome:${'$'}outcome,reason:${'$'}reason,review_url:(if ${'$'}review_url == "" then null else ${'$'}review_url end),marker:${'$'}marker}' \
-                    "${'$'}RESULT" > "${'$'}OUTPUT_DIR/review-result.next.json"
-                  mv "${'$'}OUTPUT_DIR/review-result.next.json" "${'$'}RESULT"
-                }
-                
-                fail_publication() {
-                  set_outcome 'failed' "${'$'}1"
-                  echo "${'$'}1" >&2
-                  if [ -s "${'$'}OUTPUT_DIR/publication-error.txt" ]; then
-                    sed -E 's/(gh[opsu]_[A-Za-z0-9_]+)/[REDACTED]/g' "${'$'}OUTPUT_DIR/publication-error.txt" >&2
-                  fi
-                  exit 1
-                }
-                
-                run_gh api "repos/${'$'}REPOSITORY/pulls/${'$'}PR_NUMBER" > "${'$'}OUTPUT_DIR/pr-final.json" \
-                  || fail_publication 'Final GitHub pull-request metadata lookup failed'
-                current_state="${'$'}("${'$'}JQ" -r '.state' "${'$'}OUTPUT_DIR/pr-final.json")"
-                current_head="${'$'}("${'$'}JQ" -r '.head.sha' "${'$'}OUTPUT_DIR/pr-final.json")"
-                if [ "${'$'}current_state" != 'open' ] || [ "${'$'}current_head" != "${'$'}head_sha" ]; then
-                  set_outcome 'superseded' 'Pull request closed or changed before publication'
-                  exit 0
-                fi
-                
-                marker_status=0
-                lookup_marker || marker_status=${'$'}?
-                case "${'$'}marker_status" in
-                  0) set_outcome 'already-published' 'Exact publisher marker appeared before publication'; exit 0 ;;
-                  1) ;;
-                  *) fail_publication 'Unable to list existing GitHub reviews' ;;
-                esac
-                
-                : > "${'$'}OUTPUT_DIR/publication-error.txt"
-                post_status=0
-                run_gh api \
-                  --method POST \
-                  -H 'Accept: application/vnd.github+json' \
-                  -H 'X-GitHub-Api-Version: 2022-11-28' \
-                  "repos/${'$'}REPOSITORY/pulls/${'$'}PR_NUMBER/reviews" \
-                  --input "${'$'}PAYLOAD" \
-                  > "${'$'}OUTPUT_DIR/publication-response.json" \
-                  2> "${'$'}OUTPUT_DIR/publication-error.txt" \
-                  || post_status=${'$'}?
-                
-                if [ "${'$'}post_status" -eq 0 ]; then
-                  "${'$'}JQ" -e --arg head "${'$'}head_sha" --arg marker "${'$'}marker" \
-                    '.commit_id == ${'$'}head and ((.body // "") | contains(${'$'}marker))' \
-                    "${'$'}OUTPUT_DIR/publication-response.json" >/dev/null \
-                    || fail_publication 'GitHub returned an unverifiable review response'
-                  review_url="${'$'}("${'$'}JQ" -r '.html_url // ""' "${'$'}OUTPUT_DIR/publication-response.json")"
-                  set_outcome 'published' 'GitHub accepted the advisory COMMENT review' "${'$'}review_url"
-                  exit 0
-                fi
-                
-                marker_status=0
-                lookup_marker || marker_status=${'$'}?
-                case "${'$'}marker_status" in
-                  0) set_outcome 'published' 'GitHub write confirmed through the exact publisher marker'; exit 0 ;;
-                  1) fail_publication 'GitHub rejected the review publication request' ;;
-                  *) fail_publication 'Unable to reconcile the GitHub publication result' ;;
-                esac
-            """.trimIndent()
-        }
-    }
-
-    triggers {
-        vcs {
-        }
-    }
-
-    features {
-        codex {
-            connectionId = "PROJECT_EXT_666"
-        }
-        pullRequests {
-            vcsRootExtId = "${HttpsGithubComValrravnTeamcityMultibranchRepoRefsHeadsMain.id}"
-            provider = github {
-                authType = vcsRoot()
-                filterTargetBranch = "+:refs/heads/main"
-                filterAuthorRole = PullRequests.GitHubRoleFilter.MEMBER
-                discoveryMode = PullRequests.branchesDiscoveryMode.source
-            }
-        }
-        gitHubAppBuildScopedToken {
-            parameterName = "github.token"
-            connectionId = "PROJECT_EXT_1357"
-            targetRepositories = "teamcity-multibranch-repo"
-        }
-    }
-})
-
-object HttpsGithubComValrravnTeamcityMultibranchRepoRefsHeadsMain : GitVcsRoot({
-    name = "https://github.com/Valrravn/teamcity-multibranch-repo#refs/heads/main"
-    url = "https://github.com/Valrravn/teamcity-multibranch-repo"
-    branch = "refs/heads/main"
-    branchSpec = "refs/heads/*"
-    authMethod = password {
-        userName = "Valrravn"
-        password = "credentialsJSON:83f560d2-0fee-4d92-8caa-591a2477ab72"
-    }
-})
-
-
-object ImportedFromGH : Project({
-    name = "Imported from GH"
-
-    vcsRoot(ImportedFromGH_HttpsGithubComValrravnSampleJavaAppMavenRefsHeadsMain)
-    vcsRoot(ImportedFromGH_AiPullRequestReviewImport)
-
-    buildType(ImportedFromGH_BuildWithPrAiReview)
-})
-
-object ImportedFromGH_BuildWithPrAiReview : BuildType({
-    name = "Build with PR ai review"
-
-    vcs {
-        root(ImportedFromGH_HttpsGithubComValrravnSampleJavaAppMavenRefsHeadsMain)
-    }
-})
-
-object ImportedFromGH_AiPullRequestReviewImport : GitVcsRoot({
-    name = "ai-pull-request-review-import"
-    url = "https://github.com/Valrravn/teamcity-ai-pull-request-reviews"
-    branch = "main"
-    branchSpec = "+:refs/heads/*"
-    authMethod = password {
-        userName = "Valrravn"
-        password = "credentialsJSON:83f560d2-0fee-4d92-8caa-591a2477ab72"
-    }
-})
-
-object ImportedFromGH_HttpsGithubComValrravnSampleJavaAppMavenRefsHeadsMain : GitVcsRoot({
-    name = "https://github.com/Valrravn/sample-java-app-maven#refs/heads/main"
-    url = "https://github.com/Valrravn/sample-java-app-maven"
-    branch = "refs/heads/main"
-    branchSpec = "refs/heads/*"
-    authMethod = password {
-        userName = "Valrravn"
-        password = "credentialsJSON:83f560d2-0fee-4d92-8caa-591a2477ab72"
-    }
-})
-
-
-object PrAiReviewPipeline : Pipeline({
-    name = "PR AI Review (pipeline)"
-
-    repositories {
-        repository(HttpsGithubComValrravnTeamcityMultibranchRepoRefsHeadsMain)
-    }
-
-    triggers {
-        vcs {
-        }
-    }
-
-    job(PrAiReviewPipeline_Job1)
-})
-
-object PrAiReviewPipeline_Job1 : Job({
-    id("Job1")
-    name = "Job 1"
-})
+                  "${'$'}OUTPUT_DIR/inline-findings.json" > "${'$'}OUTPUT
