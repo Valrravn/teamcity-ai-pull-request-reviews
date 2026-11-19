@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <project>
   <modelVersion>4.0.0</modelVersion>
-  <name>Sandbox_DmitriiKorovin_AIInBuilds Config DSL Script</name>
-  <groupId>Sandbox_DmitriiKorovin_AIInBuilds</groupId>
-  <artifactId>Sandbox_DmitriiKorovin_AIInBuilds_dsl</artifactId>
+  <name>TeamCity AI Pull Request Reviews Config DSL Script</name>
+  <groupId>TeamCityAiPullRequestReviews</groupId>
+  <artifactId>TeamCityAiPullRequestReviews_dsl</artifactId>
   <version>1.0-SNAPSHOT</version>
 
   <parent>
@@ -22,7 +22,9 @@
     </repository>
     <repository>
       <id>teamcity-server</id>
-      <url>https://teamcity-nightly.labs.intellij.net/app/dsl-plugins-repository</url>
+      <!-- Replace with the URL of your TeamCity server. Its DSL plugins repository provides
+           the Kotlin DSL of installed plugins, such as the codex {} build feature. -->
+      <url>http://localhost:8111/app/dsl-plugins-repository</url>
       <snapshots>
         <enabled>true</enabled>
       </snapshots>
