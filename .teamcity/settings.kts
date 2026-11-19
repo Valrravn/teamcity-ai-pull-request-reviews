@@ -4,79 +4,53 @@ import jetbrains.buildServer.configs.kotlin.buildFeatures.codex
 import jetbrains.buildServer.configs.kotlin.buildFeatures.gitHubAppBuildScopedToken
 import jetbrains.buildServer.configs.kotlin.buildFeatures.pullRequests
 import jetbrains.buildServer.configs.kotlin.buildSteps.script
-import jetbrains.buildServer.configs.kotlin.pipelines.*
-import jetbrains.buildServer.configs.kotlin.projectFeatures.githubAppConnection
 import jetbrains.buildServer.configs.kotlin.triggers.vcs
-import jetbrains.buildServer.configs.kotlin.vcs.GitVcsRoot
 
 /*
-The settings script is an entry point for defining a TeamCity
-project hierarchy. The script should contain a single call to the
-project() function with a Project instance or an init function as
-an argument.
+Sample: AI pull request reviews with Codex.
+See https://www.jetbrains.com/help/teamcity/ai-in-builds.html for the walkthrough.
 
-VcsRoots, BuildTypes, Templates, and subprojects can be
-registered inside the project using the vcsRoot(), buildType(),
-template(), and subProject() methods respectively.
+Projects that use context parameters cannot be edited in the TeamCity UI. Create the following
+in the PARENT project of the project you import these settings into:
 
-To debug settings scripts in command-line, run the
+  * a VCS root for the repository to review, including credentials if the repository is private;
+  * an AI Provider connection that can serve OpenAI models;
+  * a GitHub App connection with "Enable build-scoped tokens" selected.
 
-    mvnDebug org.jetbrains.teamcity:teamcity-configs-maven-plugin:generate
+When you create a project from these settings, TeamCity asks for the following context parameters:
 
-command and attach your debugger to the port 8000.
-
-To debug in IntelliJ Idea, open the 'Maven Projects' tool window (View
--> Tool Windows -> Maven Projects), find the generate task node
-(Plugins -> teamcity-configs -> teamcity-configs:generate), the
-'Debug' option is available in the context menu for the task.
+  vcsRootId               External ID of the VCS root.
+  githubRepository        The repository to review, as owner/name, with the exact capitalization GitHub shows.
+  aiProviderConnectionId  ID of the AI Provider connection.
+  gitHubAppConnectionId   ID of the GitHub App connection.
+  reviewBotUserId         Numeric user ID of the GitHub App's bot account (not the App ID).
 */
 
 version = "2026.1"
 
 project {
-
-    vcsRoot(HttpsGithubComValrravnTeamcityMultibranchRepoRefsHeadsMain)
-
     buildType(PrAiReview)
-
-    features {
-        githubAppConnection {
-            id = "PROJECT_EXT_1357"
-            displayName = "GitHub App Nightly"
-            appId = "5830780"
-            clientId = "Iv23lixbYlg29i2fUVMR"
-            clientSecret = "credentialsJSON:4d5bb200-0e19-4ac3-b123-6965ad42dfed"
-            privateKey = "credentialsJSON:04c3ec44-db67-4517-bfc6-61a8c44177c8"
-            webhookSecret = "credentialsJSON:1dfc6d2e-6928-40f5-8de9-9895155e13d2"
-            ownerUrl = "https://github.com/Valrravn"
-            useUniqueCallback = true
-            allowBuildScopedTokens = true
-        }
-    }
-
-    pipeline(Sandbox_DmitriiKorovin_AIInBuilds_PrAiReviewPipeline)
 }
 
 object PrAiReview : BuildType({
     name = "PR AI Review"
 
     params {
+        param("review.run", "true")
+        param("review.publish", "false")
+        param("review.repository", "${DslContext.getParameter("githubRepository")}")
         param("review.acceptance.mode", "normal")
         param("review.model", "gpt-6.1-sol")
-        param("review.publisher.id", "241940790")
-        param("review.publish", "false")
+        param("review.publisher.id", "${DslContext.getParameter("reviewBotUserId")}")
         param("review.harness", "OpenAI CLI")
         param("jq.version", "1.8.1")
         param("review.effort", "xhigh")
-        param("review.publisher.login", "ai-checker[bot]")
         param("gh.version", "2.98.0")
-        param("review.run", "true")
     }
 
     vcs {
-        root(HttpsGithubComValrravnTeamcityMultibranchRepoRefsHeadsMain)
+        root(AbsoluteId(DslContext.getParameter("vcsRootId")))
     }
-
     steps {
         script {
             name = "Install tools"
@@ -119,8 +93,7 @@ object PrAiReview : BuildType({
                 GH="${'$'}OUTPUT_DIR/tools/gh"
                 JQ="${'$'}OUTPUT_DIR/tools/jq"
                 GH_CONFIG_DIR="${'$'}OUTPUT_DIR/gh-config"
-                REPOSITORY='Valrravn/teamcity-multibranch-repo'
-                PUBLISHER_LOGIN='%review.publisher.login%'
+                REPOSITORY='%review.repository%'
                 PUBLISHER_ID='%review.publisher.id%'
                 PR_NUMBER='%teamcity.pullRequest.number%'
                 VCS_REVISION='%build.vcs.number%'
@@ -168,13 +141,10 @@ object PrAiReview : BuildType({
                   "${'$'}JQ" -e \
                     --arg marker "${'$'}marker" \
                     --arg head "${'$'}head_sha" \
-                    --arg login "${'$'}PUBLISHER_LOGIN" \
                     --argjson publisher_id "${'$'}PUBLISHER_ID" \
-                    'add | any(.[]; .commit_id == ${'$'}head and .user.id == ${'$'}publisher_id and .user.login == ${'$'}login and ((.body // "") | contains(${'$'}marker)))' \
+                    'add | any(.[]; .commit_id == ${'$'}head and .user.id == ${'$'}publisher_id and ((.body // "") | contains(${'$'}marker)))' \
                     "${'$'}pages" >/dev/null
                 }
-                
-                run_gh api repos/${'$'}REPOSITORY/pulls/${'$'}PR_NUMBER/reviews --jq '.[].user | {login, id}'
                 
                 run_gh api "repos/${'$'}REPOSITORY/pulls/${'$'}PR_NUMBER" > "${'$'}OUTPUT_DIR/pr.json" \
                   || fail_closed 'GitHub pull-request metadata lookup failed'
@@ -184,14 +154,12 @@ object PrAiReview : BuildType({
                 base_ref="${'$'}("${'$'}JQ" -r '.base.ref' "${'$'}OUTPUT_DIR/pr.json")"
                 base_sha="${'$'}("${'$'}JQ" -r '.base.sha' "${'$'}OUTPUT_DIR/pr.json")"
                 is_draft="${'$'}("${'$'}JQ" -r '.draft' "${'$'}OUTPUT_DIR/pr.json")"
-                author_association="${'$'}("${'$'}JQ" -r '.author_association' "${'$'}OUTPUT_DIR/pr.json")"
                 
                 [ "${'$'}state" = 'open' ] || finish_without_review 'superseded' 'Pull request is no longer open'
                 [ "${'$'}head_sha" = "${'$'}VCS_REVISION" ] || finish_without_review 'superseded' 'Pull-request head changed before review'
                 [ "${'$'}head_repo" = "${'$'}REPOSITORY" ] || fail_closed 'Fork-originated pull requests are not eligible'
                 [ "${'$'}base_ref" = 'main' ] || fail_closed 'Pull request does not target main'
                 [ "${'$'}is_draft" = 'false' ] || fail_closed 'Draft pull requests are not eligible'
-                # [ "${'$'}author_association" = 'MEMBER' ] || fail_closed 'Pull-request author is not a GitHub organization member'
                 
                 if [ "${'$'}ACCEPTANCE_MODE" = 'normal' ]; then
                   marker_status=0
@@ -210,8 +178,8 @@ object PrAiReview : BuildType({
                 git merge-base --is-ancestor "${'$'}merge_base" "${'$'}head_sha" \
                   || fail_closed 'Merge base is not an ancestor of the pull request head'
                 
-                THREADS_QUERY='query(${'$'}number:Int!,${'$'}endCursor:String){repository(owner:"Valrravn",name:"teamcity-multibranch-repo"){pullRequest(number:${'$'}number){reviewThreads(first:100,after:${'$'}endCursor){nodes{id isResolved isOutdated path line startLine diffSide} pageInfo{hasNextPage endCursor}}}}}'
-                run_gh api graphql --paginate --slurp -F number="${'$'}PR_NUMBER" -f query="${'$'}THREADS_QUERY" > "${'$'}OUTPUT_DIR/thread-pages.json" \
+                THREADS_QUERY='query(${'$'}owner:String!,${'$'}name:String!,${'$'}number:Int!,${'$'}endCursor:String){repository(owner:${'$'}owner,name:${'$'}name){pullRequest(number:${'$'}number){reviewThreads(first:100,after:${'$'}endCursor){nodes{id isResolved isOutdated path line startLine diffSide} pageInfo{hasNextPage endCursor}}}}}'
+                run_gh api graphql --paginate --slurp -f owner="${'$'}(cut -d/ -f1 <<< "${'$'}REPOSITORY")" -f name="${'$'}(cut -d/ -f2 <<< "${'$'}REPOSITORY")" -F number="${'$'}PR_NUMBER" -f query="${'$'}THREADS_QUERY" > "${'$'}OUTPUT_DIR/thread-pages.json" \
                   || fail_closed 'Unable to fetch unresolved review threads'
                 
                 "${'$'}JQ" -c '.[] | .data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)' "${'$'}OUTPUT_DIR/thread-pages.json" |
@@ -542,8 +510,7 @@ object PrAiReview : BuildType({
                 GH="${'$'}OUTPUT_DIR/tools/gh"
                 JQ="${'$'}OUTPUT_DIR/tools/jq"
                 GH_CONFIG_DIR="${'$'}OUTPUT_DIR/gh-config"
-                REPOSITORY='Valrravn/teamcity-multibranch-repo'
-                PUBLISHER_LOGIN='%review.publisher.login%'
+                REPOSITORY='%review.repository%'
                 PUBLISHER_ID='%review.publisher.id%'
                 PR_NUMBER='%teamcity.pullRequest.number%'
                 GITHUB_APP_TOKEN='%github.token%'
@@ -564,9 +531,8 @@ object PrAiReview : BuildType({
                   "${'$'}JQ" -e \
                     --arg marker "${'$'}marker" \
                     --arg head "${'$'}head_sha" \
-                    --arg login "${'$'}PUBLISHER_LOGIN" \
                     --argjson publisher_id "${'$'}PUBLISHER_ID" \
-                    'add | any(.[]; .commit_id == ${'$'}head and .user.id == ${'$'}publisher_id and .user.login == ${'$'}login and ((.body // "") | contains(${'$'}marker)))' \
+                    'add | any(.[]; .commit_id == ${'$'}head and .user.id == ${'$'}publisher_id and ((.body // "") | contains(${'$'}marker)))' \
                     "${'$'}OUTPUT_DIR/reviews-pages.json" >/dev/null
                 }
                 
@@ -635,63 +601,61 @@ object PrAiReview : BuildType({
                 esac
             """.trimIndent()
         }
+        script {
+            name = "Report outcome"
+            id = "Report_outcome"
+            executionMode = BuildStep.ExecutionMode.ALWAYS
+            scriptContent = """
+                #!/usr/bin/env bash
+                set -uo pipefail
+                
+                OUTPUT_DIR='%system.teamcity.build.tempDir%/codex-pr-review'
+                JQ="${'$'}OUTPUT_DIR/tools/jq"
+                RESULT="${'$'}OUTPUT_DIR/review-result.json"
+                
+                if [ ! -x "${'$'}JQ" ] || [ ! -f "${'$'}RESULT" ]; then
+                  echo 'No review result to report'
+                  exit 0
+                fi
+                
+                echo "##teamcity[publishArtifacts '${'$'}RESULT']"
+                
+                status="${'$'}("${'$'}JQ" -r '
+                  def tc: gsub("\\|"; "||") | gsub("\u0027"; "|\u0027") | gsub("\\["; "|[") | gsub("\\]"; "|]") | gsub("\n"; "|n");
+                  "AI review: \(.publication.outcome // "unknown")" +
+                  (if .publication.reason then " (\(.publication.reason))" else "" end) | tc
+                ' "${'$'}RESULT")"
+                echo "##teamcity[buildStatus text='${'$'}status; {build.status.text}']"
+            """.trimIndent()
+        }
     }
 
     triggers {
         vcs {
+            branchFilter = "+pr: target=main sourceRepo=same draft=false"
         }
+    }
+
+    requirements {
+        contains("teamcity.agent.jvm.os.name", "Linux")
     }
 
     features {
         codex {
-            connectionId = "PROJECT_EXT_666"
+            connectionId = "${DslContext.getParameter("aiProviderConnectionId")}"
         }
         pullRequests {
-            vcsRootExtId = "${HttpsGithubComValrravnTeamcityMultibranchRepoRefsHeadsMain.id}"
+            vcsRootExtId = DslContext.getParameter("vcsRootId")
             provider = github {
                 authType = vcsRoot()
                 filterTargetBranch = "+:refs/heads/main"
                 filterAuthorRole = PullRequests.GitHubRoleFilter.MEMBER
-                discoveryMode = PullRequests.branchesDiscoveryMode.source
             }
         }
         gitHubAppBuildScopedToken {
             parameterName = "github.token"
-            connectionId = "PROJECT_EXT_1357"
-            targetRepositories = "teamcity-multibranch-repo"
+            connectionId = "${DslContext.getParameter("gitHubAppConnectionId")}"
+            targetRepositories = DslContext.getParameter("githubRepository").substringAfter("/")
         }
     }
-})
-
-object HttpsGithubComValrravnTeamcityMultibranchRepoRefsHeadsMain : GitVcsRoot({
-    name = "https://github.com/Valrravn/teamcity-multibranch-repo#refs/heads/main"
-    url = "https://github.com/Valrravn/teamcity-multibranch-repo"
-    branch = "refs/heads/main"
-    branchSpec = "refs/heads/*"
-    authMethod = password {
-        userName = "Valrravn"
-        password = "credentialsJSON:83f560d2-0fee-4d92-8caa-591a2477ab72"
-    }
-})
-
-
-object Sandbox_DmitriiKorovin_AIInBuilds_PrAiReviewPipeline : Pipeline({
-    id("PrAiReviewPipeline")
-    name = "PR AI Review (pipeline)"
-
-    repositories {
-        repository(HttpsGithubComValrravnTeamcityMultibranchRepoRefsHeadsMain)
-    }
-
-    triggers {
-        vcs {
-        }
-    }
-
-    job(Sandbox_DmitriiKorovin_AIInBuilds_PrAiReviewPipeline_Job1)
-})
-
-object Sandbox_DmitriiKorovin_AIInBuilds_PrAiReviewPipeline_Job1 : Job({
-    id("Job1")
-    name = "Job 1"
 })
